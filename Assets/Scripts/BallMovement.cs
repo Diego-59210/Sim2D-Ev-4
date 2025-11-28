@@ -1,7 +1,7 @@
 using PUCV.PhysicEngine2D;
 using UnityEngine;
 
-public class BallMovement : MonoBehaviour, IHasCollider
+public class BallMovement : MonoBehaviour
 {
     [Header("Ball Settings")]
     public float launchForce = 10f;
@@ -29,12 +29,11 @@ public class BallMovement : MonoBehaviour, IHasCollider
 
         if (_rigidbody != null)
         {
-            _rigidbody.useGravity = true;
             _rigidbody.velocity = direction * launchForce;
         }
     }
 
-    public void OnInformCollisionEnter2D(CollisionInfo collisionInfo)
+    /* public void OnInformCollisionEnter2D(CollisionInfo collisionInfo)
     {
         if (_rigidbody == null) return;
 
@@ -48,4 +47,9 @@ public class BallMovement : MonoBehaviour, IHasCollider
 
         collisionInfo.otherRigidbody.velocity += impulse;
     }
+
+    public void OnInformCollisionExit2D(CollisionInfo collisionInfo)
+    {
+        throw new System.NotImplementedException();
+    } */
 }

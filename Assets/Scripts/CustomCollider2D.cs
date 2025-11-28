@@ -13,14 +13,17 @@ namespace PUCV.PhysicEngine2D
             Rectangle
         }
 
+        public bool isTrigger;
         public ShapeType type = ShapeType.Rectangle;
 
         public Circle2D circleOverride;
         public Triangle2D triangleShape;
 
         private SpriteRenderer _sr;
-        
-        private IHasCollider _colliderListener;
+
+        private ICustomCollision _colliderListener;
+        private ICustomTrigger _triggerListener;
+
         
         [NonSerialized]
         public CustomRigidbody2D rigidBody;
@@ -31,12 +34,16 @@ namespace PUCV.PhysicEngine2D
         private bool _registered;
         private void Start()
         {
-            RegisterToPhysicsManager();
             rigidBody = GetComponent<CustomRigidbody2D>();
+            RegisterToPhysicsManager();
             
         }
-        
-        
+
+        void OnDisable()
+        {
+            UnregisterFromPhysicsManager();
+        }
+
         private void RegisterToPhysicsManager()
         {
             if (_registered) return;
@@ -90,7 +97,13 @@ namespace PUCV.PhysicEngine2D
         public void Awake()
         {
             GetSpriteRenderer();
-            _colliderListener = GetComponent<IHasCollider>();
+            _colliderListener = GetComponent<ICustomCollision>();
+            _triggerListener = GetComponent<ICustomTrigger>();
+        }
+
+        public Bounds GetBounds()
+        {
+            return _sr.bounds;
         }
         
         public Rectangle2D GetRectWorldVerts()
@@ -169,7 +182,28 @@ namespace PUCV.PhysicEngine2D
         {
             _colliderListener?.OnInformCollisionEnter2D(collisionInfo);
         }
+        public void InformOnCollisionStay2D(CollisionInfo collisionInfo)
+        {
+            _colliderListener?.OnInformCollisionStay2D(collisionInfo);
+        }
+        public void InformOnCollisionExit2D(CollisionInfo collisionInfo)
+        {
+            _colliderListener?.OnInformCollisionExit2D(collisionInfo);
+        }
+        public void InformOnTriggerEnter2D(CollisionInfo info)
+        {
+            _triggerListener?.OnInformTriggerEnter2D(info);
+        }
 
+        public void InformOnTriggerStay2D(CollisionInfo info)
+        {
+            _triggerListener?.OnInformTriggerStay2D(info);
+        }
+
+        public void InformOnTriggerExit2D(CollisionInfo info)
+        {
+            _triggerListener?.OnInformTriggerExit2D(info);
+        }
         public void AddRigidbodyReference(CustomRigidbody2D customRigidbody2D)
         {
             rigidBody = customRigidbody2D;
@@ -206,9 +240,9 @@ namespace PUCV.PhysicEngine2D
         public Rectangle2D()
         {
             LU = new Vector2(-1f, 1f);
-            LU = new Vector2(-1f, -1f);
-            LU = new Vector2(1f, 1f);
-            LU = new Vector2(-1f, 1f);
+            LD = new Vector2(-1f, -1f);
+            RU = new Vector2(1f, 1f);
+            RD = new Vector2(1f, -1f);
         }
     }
     

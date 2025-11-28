@@ -6,40 +6,48 @@ namespace PUCV.PhysicEngine2D
 {
     public class CustomRigidbody2D : MonoBehaviour
     {
-        public Vector2 velocity;
         public float mass = 1f;
-        public float stopThreshold = 0.15f;
+        [Range(0f, 1f)] public float restitution = 0.2f; 
+        [Range(0f, 1f)] public float friction = 0.2f;
 
-        public bool useStopThreshold = true;
-        public bool useGravity = true;
-        public float gravityScale = 1f;
-        private CustomCollider2D _customCollider;
+        // runtime
+        [HideInInspector] public Vector2 velocity;
+        [HideInInspector] public Vector2 accumulatedForces;
+        private float _invMass;
 
-        //Detener el cuerpo para evitar pequeños movimientos.
-        public void ApplyStopThreshold()
+        public bool IsStatic => mass <= 0f;
+
+        void Awake()
         {
-            if (!useStopThreshold) return;
-
-            if (velocity.sqrMagnitude < stopThreshold * stopThreshold)
-            {
-                useGravity = false; 
-                velocity = Vector2.zero;
-            }
+            _invMass = mass > 0f ? 1f / mass : 0f;
         }
 
-        public Vector2 GetWorldPosition()
+        public float InverseMass => _invMass;
+
+        public void AddForce(Vector2 f)
         {
-            return transform.position;
-        }
-        
-        public void SetWoldPosition(Vector2 newPos)
-        {
-            transform.position = newPos;
+            accumulatedForces += f;
         }
 
-        public CustomCollider2D GetCollider()
+        public void ClearForces()
         {
-            return _customCollider;
+            accumulatedForces = Vector2.zero;
         }
+
+        public void IntegrateVelocity(float dt)
+        {
+            if (IsStatic) return;
+            Vector2 accel = accumulatedForces * _invMass;
+            velocity += accel * dt;
+        }
+
+        public void IntegratePosition(float dt)
+        {
+            if (IsStatic) return;
+            transform.position = (Vector2)transform.position + velocity * dt;
+        }
+
+        public Vector2 GetWorldPosition() => (Vector2)transform.position;
+        public void SetWorldPosition(Vector2 p) => transform.position = p;
     }
 }

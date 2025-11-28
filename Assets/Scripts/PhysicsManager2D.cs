@@ -3,192 +3,390 @@ using UnityEngine;
 
 namespace PUCV.PhysicEngine2D
 {
+    [DefaultExecutionOrder(-100)]
     public class PhysicsManager2D : MonoBehaviour
     {
         private static PhysicsManager2D _instance;
-        private bool _registered;
-        private List<CustomCollider2D> _colliders = new List<CustomCollider2D>();
-        public Vector2 globalGravity = new Vector2(0, -9.81f);
-        
-        //Per FixedUpdateList
+        public static PhysicsManager2D Instance => _instance;
+
+        [Header("World Settings")]
+        public Vector2 globalGravity = new Vector2(0f, -9.81f);
+
+        [Header("Collision Settings")]
+        [Range(0f, 1f)] public float positionalCorrectionPercent = 0.8f;
+        public float penetrationSlop = 0.01f;
+
+        private readonly List<CustomCollider2D> _colliders = new List<CustomCollider2D>();
         private List<InternalCollisionInfo> _currentCollisionList = new List<InternalCollisionInfo>();
+        private List<InternalCollisionInfo> _prevCollisionList = new List<InternalCollisionInfo>();
+        private HashSet<(CustomCollider2D, CustomCollider2D)> _currentPairs = new HashSet<(CustomCollider2D, CustomCollider2D)>();
+        private HashSet<(CustomCollider2D, CustomCollider2D)> _previousPairs = new HashSet<(CustomCollider2D, CustomCollider2D)>();
 
         private void Awake()
         {
-            if (_instance != null)
+            if (_instance != null && _instance != this)
             {
-                DestroyImmediate(this);
+                Destroy(gameObject);
                 return;
             }
-            
-            //Singleton
+
             _instance = this;
-            DontDestroyOnLoad(_instance);
+            DontDestroyOnLoad(gameObject);
         }
 
-        public static void RegisterCollider(CustomCollider2D customCollider2D)
+        private void OnDestroy()
         {
-            if(_instance) _instance._colliders.Add(customCollider2D);
+            if (_instance == this) _instance = null;
         }
 
-        public static void UnregisterCollider(CustomCollider2D customCollider2D)
+        public static void RegisterCollider(CustomCollider2D c)
         {
-            if(_instance) _instance._colliders.Remove(customCollider2D);
+            if (_instance == null) return;
+            if (c == null) return;
+            if (!_instance._colliders.Contains(c))
+                _instance._colliders.Add(c);
         }
 
+        public static void UnregisterCollider(CustomCollider2D c)
+        {
+            if (_instance == null) return;
+            if (c == null) return;
+            _instance._colliders.Remove(c);
+        }
+
+        // -------------------------------------------------------
+        // FIXED UPDATE LOOP
+        // -------------------------------------------------------
         private void FixedUpdate()
         {
-            float deltaTime = Time.fixedDeltaTime;
-            StepApplyGravity(deltaTime);
-            StepCalculateCollisions(deltaTime);
-            StepApplyMTVAndReflectionToRigidbodies(deltaTime);
-            StepApplyMovementToRigidbodies(deltaTime);
-            StepInformCollisions(deltaTime);
+            float dt = Time.fixedDeltaTime;
+
+            if (_colliders.Count == 0) return;
+
+            // 0) Clear forces on each rigidbody (start-of-step)
+            for (int i = 0; i < _colliders.Count; i++)
+            {
+                var rb = _colliders[i].rigidBody;
+                if (rb != null) rb.ClearForces();
+            }
+
+            // 1) Apply global uniform gravity
+            ApplyUniformGravity();
+
+            // 2) Integrate velocities (semi-implicit Euler)
+            for (int i = 0; i < _colliders.Count; i++)
+            {
+                var rb = _colliders[i].rigidBody;
+                if (rb == null) continue;
+                rb.IntegrateVelocity(dt);
+            }
+
+            // 3) Collision detection (SAT)
+            CalculateCollisions();
+
+            // 4) Resolve collisions (impulse + positional correction)
+            ResolveCollisions(dt);
+
+            // 5) Integrate positions
+            for (int i = 0; i < _colliders.Count; i++)
+            {
+                var rb = _colliders[i].rigidBody;
+                if (rb == null) continue;
+                rb.IntegratePosition(dt);
+            }
+
+
+            // -----------------------------
+            // 6) Build collision pairs for STAY logic
+            // -----------------------------
+
+            // Save previous frame’s pairs
+            _previousPairs.Clear();
+            foreach (var p in _currentPairs)
+                _previousPairs.Add(p);
+
+            // Rebuild current pairs from this frame
+            _currentPairs.Clear();
+            foreach (var c in _currentCollisionList)
+            {
+                var a = c.bodyACollider;
+                var b = c.bodyBCollider;
+                if (a == null || b == null) continue;
+
+                // deterministic ordering
+                if (a.GetInstanceID() < b.GetInstanceID())
+                    _currentPairs.Add((a, b));
+                else
+                    _currentPairs.Add((b, a));
+            }
+
+
+            // ------------------------------------
+            // 7) Inform events → Enter + Stay
+            // ------------------------------------
+            InformCollisionAndTriggerEnter();
+
+
+            // ------------------------------------
+            // 8) Inform events → Exit
+            // ------------------------------------
+            InformCollisionAndTriggerExit();
+
+
+            // ------------------------------------
+            // 9) Copy current collisions into prev list
+            // ------------------------------------
+            _prevCollisionList.Clear();
+            _prevCollisionList.AddRange(_currentCollisionList);
         }
-        private void StepApplyGravity(float deltaTime)
+
+        // -------------------------------------------------------
+        // GRAVITY
+        // -------------------------------------------------------
+        private void ApplyUniformGravity()
         {
             foreach (var col in _colliders)
             {
-                CustomRigidbody2D rb = col.rigidBody;
+                var rb = col.rigidBody;
                 if (rb == null) continue;
-                if (!rb.useGravity) continue;
+                if (rb.IsStatic) continue;
 
-                // a = g * gravityScale
-                Vector2 acceleration = globalGravity * rb.gravityScale;
-
-                // v = v + a dt
-                rb.velocity += acceleration * deltaTime;
+                rb.AddForce(globalGravity * rb.mass);
             }
         }
 
-        private void StepApplyMTVAndReflectionToRigidbodies(float deltaTime)
+        // -------------------------------------------------------
+        // COLLISION DETECTION (SAT)
+        // -------------------------------------------------------
+        private void CalculateCollisions()
         {
-            
-            foreach (var currCollisionInfo in _currentCollisionList)
+            _currentCollisionList.Clear();
+
+            var detected = SAT2DMath.DetectCollisions(_colliders);
+            if (detected != null && detected.Count > 0)
+                _currentCollisionList.AddRange(detected);
+
+            // Was this colliding last frame?
+            foreach (var cur in _currentCollisionList)
             {
-                var customRigidbody2DA = currCollisionInfo.bodyARigidbody;
-                var customRigidbody2DB = currCollisionInfo.bodyBRigidbody;
-                //Move rigidbodies according to MTV
-                
-                if (currCollisionInfo.hasMTV)
+                cur.wasCollidedLastFrame = false;
+
+                foreach (var prev in _prevCollisionList)
                 {
-                    if (customRigidbody2DA)
+                    bool same =
+                        (prev.bodyACollider == cur.bodyACollider && prev.bodyBCollider == cur.bodyBCollider) ||
+                        (prev.bodyACollider == cur.bodyBCollider && prev.bodyBCollider == cur.bodyACollider);
+
+                    if (same)
                     {
-                        Vector2 position = customRigidbody2DA.GetWorldPosition();
-                        position += currCollisionInfo.mtvA;
-                        customRigidbody2DA.SetWoldPosition(position);
-                    }
-                    if (customRigidbody2DB)
-                    {
-                        Vector2 position = customRigidbody2DB.GetWorldPosition();
-                        position += currCollisionInfo.mtvB;
-                        customRigidbody2DB.SetWoldPosition(position);
-                    }
-                }
-                
-                float restitution = 1f; 
-
-                if (customRigidbody2DA)
-                {
-                    Vector2 v = customRigidbody2DA.velocity;
-                    Vector2 n = currCollisionInfo.contactNormalAB.normalized;
-
-                    Vector2 reflected = v - 2f * Vector2.Dot(v, n) * n;
-                    customRigidbody2DA.velocity = reflected * restitution;
-                }
-
-                if (customRigidbody2DB)
-                {
-                    Vector2 v = customRigidbody2DB.velocity;
-                    Vector2 n = currCollisionInfo.contactNormalBA.normalized;
-
-                    Vector2 reflected = v - 2f * Vector2.Dot(v, n) * n;
-                    customRigidbody2DB.velocity = reflected * restitution;
-                }
-            }
-        }
-
-        private void StepCalculateCollisions(float deltaTime)
-        {
-            //var currCollisionList = SimpleCollisionMath2D.DetectCollisions(_colliders);
-            var currCollisionList = SAT2DMath.DetectCollisions(_colliders);
-            
-            //Check if collision was present last frame
-            foreach (var currCollisionInfo in currCollisionList)
-            {
-                currCollisionInfo.wasCollidedLastFrame = false;
-                foreach (var prevCollisionInfo in _currentCollisionList)
-                {
-                    if ((prevCollisionInfo.bodyACollider == currCollisionInfo.bodyACollider &&
-                         prevCollisionInfo.bodyBCollider == currCollisionInfo.bodyBCollider) ||
-                        (prevCollisionInfo.bodyACollider == currCollisionInfo.bodyBCollider &&
-                         prevCollisionInfo.bodyBCollider == currCollisionInfo.bodyACollider))
-                    {
-                        currCollisionInfo.wasCollidedLastFrame = true;
+                        cur.wasCollidedLastFrame = true;
                         break;
                     }
                 }
             }
-
-            _currentCollisionList = currCollisionList;
         }
-        
-        private void StepInformCollisions(float deltaTime)
+
+        // -------------------------------------------------------
+        // RESOLUTION (SKIPS TRIGGERS)
+        // -------------------------------------------------------
+        private void ResolveCollisions(float dt)
         {
-            foreach (var currCollisionInfo in _currentCollisionList)
+            foreach (var info in _currentCollisionList)
             {
-                if (currCollisionInfo.wasCollidedLastFrame) continue;
-                CollisionInfo a = currCollisionInfo.GetCollInfoForBodyA();
-                CollisionInfo b = currCollisionInfo.GetCollInfoForBodyB();
-                currCollisionInfo.bodyACollider.InformOnCollisionEnter2D(a);
-                currCollisionInfo.bodyBCollider.InformOnCollisionEnter2D(b);
+                // Skip triggers
+                if (info.bodyACollider.isTrigger || info.bodyBCollider.isTrigger)
+                    continue;
+
+                var a = info.bodyARigidbody;
+                var b = info.bodyBRigidbody;
+
+                Vector2 mtv = info.mtvB - info.mtvA;
+                float penetration = mtv.magnitude;
+
+                Vector2 normal =
+                    mtv.sqrMagnitude > 1e-9f ?
+                    mtv.normalized :
+                    info.contactNormalBA.normalized;
+
+                float invMassA = a != null ? a.InverseMass : 0f;
+                float invMassB = b != null ? b.InverseMass : 0f;
+                float invMassSum = invMassA + invMassB;
+
+                // --- positional correction ---
+                if (invMassSum > 0f && penetration > penetrationSlop)
+                {
+                    float correctionMag = (Mathf.Max(penetration - penetrationSlop, 0f) /
+                                           invMassSum) * positionalCorrectionPercent;
+                    Vector2 correction = normal * correctionMag;
+
+                    if (a != null && !a.IsStatic) a.SetWorldPosition(a.GetWorldPosition() - correction * invMassA);
+                    if (b != null && !b.IsStatic) b.SetWorldPosition(b.GetWorldPosition() + correction * invMassB);
+                }
+
+                // --- impulses ---
+                Vector2 velA = a != null ? a.velocity : Vector2.zero;
+                Vector2 velB = b != null ? b.velocity : Vector2.zero;
+                Vector2 relVel = velB - velA;
+
+                float velAlongNormal = Vector2.Dot(relVel, normal);
+                if (velAlongNormal > 0f) continue;
+
+                float e = 0f;
+                if (a != null) e = Mathf.Max(e, a.restitution);
+                if (b != null) e = Mathf.Max(e, b.restitution);
+
+                float j = -(1f + e) * velAlongNormal;
+                j /= invMassSum;
+
+                Vector2 impulse = j * normal;
+
+                if (a != null && !a.IsStatic) a.velocity -= impulse * invMassA;
+                if (b != null && !b.IsStatic) b.velocity += impulse * invMassB;
+
+                // --- friction ---
+                relVel = (b != null ? b.velocity : Vector2.zero) - (a != null ? a.velocity : Vector2.zero);
+
+                Vector2 tangent = relVel - Vector2.Dot(relVel, normal) * normal;
+                if (tangent.sqrMagnitude > 1e-9f) tangent.Normalize();
+
+                float jt = -Vector2.Dot(relVel, tangent);
+                jt /= invMassSum;
+
+                float mu = 0f;
+                if (a != null) mu = Mathf.Max(mu, a.friction);
+                if (b != null) mu = Mathf.Max(mu, b.friction);
+
+                float jtClamped = Mathf.Clamp(jt, -j * mu, j * mu);
+                Vector2 frictionImpulse = jtClamped * tangent;
+
+                if (a != null && !a.IsStatic) a.velocity -= frictionImpulse * invMassA;
+                if (b != null && !b.IsStatic) b.velocity += frictionImpulse * invMassB;
             }
         }
 
-        void StepApplyMovementToRigidbodies(float deltaTime)
+        // -------------------------------------------------------
+        // EVENTS (COLLISION + TRIGGER)
+        // -------------------------------------------------------
+        private void InformCollisionAndTriggerEnter()
         {
-            if (_colliders == null || _colliders.Count == 0) return;
-            foreach (CustomCollider2D collider in _colliders)
+            foreach (var info in _currentCollisionList)
             {
-                CustomRigidbody2D rigidbody = collider.rigidBody;
-                if (rigidbody == null) continue;
-                Vector2 rigidbodyPos = rigidbody.GetWorldPosition();
-                rigidbodyPos += rigidbody.velocity*deltaTime;
-                rigidbody.SetWoldPosition(rigidbodyPos);
-                rigidbody.ApplyStopThreshold();
+                bool isTrigger = info.bodyACollider.isTrigger || info.bodyBCollider.isTrigger;
+                bool isNewPair = !_previousPairs.Contains(SortPair(info.bodyACollider, info.bodyBCollider));
+
+                var aInfo = info.GetCollInfoForBodyA();
+                var bInfo = info.GetCollInfoForBodyB();
+
+                if (isNewPair)
+                {
+                    if (isTrigger)
+                    {
+                        info.bodyACollider?.InformOnTriggerEnter2D(aInfo);
+                        info.bodyBCollider?.InformOnTriggerEnter2D(bInfo);
+                    }
+                    else
+                    {
+                        info.bodyACollider?.InformOnCollisionEnter2D(aInfo);
+                        info.bodyBCollider?.InformOnCollisionEnter2D(bInfo);
+                    }
+                }
+                else
+                {
+                    if (isTrigger)
+                    {
+                        info.bodyACollider?.InformOnTriggerStay2D(aInfo);
+                        info.bodyBCollider?.InformOnTriggerStay2D(bInfo);
+                    }
+                    else
+                    {
+                        info.bodyACollider?.InformOnCollisionStay2D(aInfo);
+                        info.bodyBCollider?.InformOnCollisionStay2D(bInfo);
+                    }
+                }
             }
+        }
+
+        private void InformCollisionAndTriggerExit()
+        {
+            foreach (var pair in _previousPairs)
+            {
+                if (_currentPairs.Contains(pair))
+                    continue; // still colliding → stay already sent
+
+                // Find corresponding InternalCollisionInfo (only for Exit data)
+                InternalCollisionInfo exitInfo = null;
+                foreach (var old in _prevCollisionList)
+                {
+                    if (PairMatches(pair, old))
+                    {
+                        exitInfo = old;
+                        break;
+                    }
+                }
+                if (exitInfo == null) continue;
+
+                bool isTrigger = exitInfo.bodyACollider.isTrigger || exitInfo.bodyBCollider.isTrigger;
+
+                var aInfo = exitInfo.GetCollInfoForBodyA();
+                var bInfo = exitInfo.GetCollInfoForBodyB();
+
+                if (isTrigger)
+                {
+                    exitInfo.bodyACollider?.InformOnTriggerExit2D(aInfo);
+                    exitInfo.bodyBCollider?.InformOnTriggerExit2D(bInfo);
+                }
+                else
+                {
+                    exitInfo.bodyACollider?.InformOnCollisionExit2D(aInfo);
+                    exitInfo.bodyBCollider?.InformOnCollisionExit2D(bInfo);
+                }
+            }
+        }
+        private (CustomCollider2D, CustomCollider2D) SortPair(CustomCollider2D a, CustomCollider2D b)
+        {
+            return (a.GetInstanceID() < b.GetInstanceID()) ? (a, b) : (b, a);
+        }
+
+        private bool PairMatches((CustomCollider2D, CustomCollider2D) pair, InternalCollisionInfo info)
+        {
+            return (pair.Item1 == info.bodyACollider && pair.Item2 == info.bodyBCollider) ||
+                (pair.Item1 == info.bodyBCollider && pair.Item2 == info.bodyACollider);
         }
     }
     
+    // -------------------------
+    // Collision representation classes (kept compatible with existing SAT2DMath)
+    // -------------------------
     public class InternalCollisionInfo
     {
-        
         public CustomCollider2D bodyACollider;
         public CustomRigidbody2D bodyARigidbody;
         public CustomCollider2D bodyBCollider;
         public CustomRigidbody2D bodyBRigidbody;
+
         public bool wasCollidedLastFrame;
-        //Minimum Translation Vector
+
+        // MTV info (SAT2DMath currently fills mtvA and mtvB)
         public bool hasMTV;
         public Vector2 mtvA;
         public Vector2 mtvB;
 
+        // contact
         public Vector2 contactPoint;
-        public Vector2 contactNormalAB;
-        public Vector2 contactNormalBA;
+        // contact normals (kept as before)
+        public Vector2 contactNormalAB; // contact normal seen from A (A -> ?)
+        public Vector2 contactNormalBA; // contact normal seen from B
 
-        public InternalCollisionInfo(
-            CustomCollider2D colA, 
-            CustomCollider2D colB, 
-            Vector2 point, 
-            Vector2 normal
-            )
+        public int missingFrames;
+
+        public InternalCollisionInfo(CustomCollider2D colA, CustomCollider2D colB, Vector2 point, Vector2 normal)
         {
             bodyACollider = colA;
-            bodyARigidbody = colA.rigidBody;
+            bodyARigidbody = colA?.rigidBody;
             bodyBCollider = colB;
-            bodyBRigidbody = colB.rigidBody;
+            bodyBRigidbody = colB?.rigidBody;
             contactPoint = point;
+            // SAT2DMath historically passed 'normal' as A->B: to keep compatibility we keep the same assignments
             contactNormalAB = -normal;
             contactNormalBA = normal;
         }
@@ -200,7 +398,8 @@ namespace PUCV.PhysicEngine2D
                 otherCollider = bodyBCollider,
                 otherRigidbody = bodyBRigidbody,
                 contactPoint = contactPoint,
-                contactNormal = contactNormalAB
+                contactNormal = contactNormalAB,
+                mtv = mtvA
             };
         }
 
@@ -211,7 +410,8 @@ namespace PUCV.PhysicEngine2D
                 otherCollider = bodyACollider,
                 otherRigidbody = bodyARigidbody,
                 contactPoint = contactPoint,
-                contactNormal = contactNormalBA
+                contactNormal = contactNormalBA,
+                mtv = mtvB
             };
         }
     }
@@ -223,6 +423,6 @@ namespace PUCV.PhysicEngine2D
 
         public Vector2 contactPoint;
         public Vector2 contactNormal;
+        public Vector2 mtv;
     }
 }
-

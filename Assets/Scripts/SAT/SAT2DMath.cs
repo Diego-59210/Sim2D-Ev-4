@@ -6,6 +6,8 @@ using CustomCollider2D = PUCV.PhysicEngine2D.CustomCollider2D;
 
 public static class SAT2DMath
 {
+    private const float PENETRATION_EPS = 0f;
+
     public struct Sat2DCollisionResult
     {
         public bool collided;
@@ -68,6 +70,19 @@ public static class SAT2DMath
                 res.normal = axis;
                 res.mtv = axis * overlap;
             }
+        }
+
+        if (!res.collided || res.depth <= PENETRATION_EPS)
+        {
+            res.collided = false;
+            res.depth = 0f;
+            res.normal = Vector2.zero;
+            res.mtv = Vector2.zero;
+        }
+        else
+        {
+            res.normal = res.normal.normalized;
+            res.mtv = res.normal * res.depth;
         }
 
         return res;
@@ -234,7 +249,7 @@ public static class SAT2DMath
         ProjectPolygon(polyA, axis, out float minA, out float maxA);
         ProjectPolygon(polyB, axis, out float minB, out float maxB);
         overlap = GetOverlap(minA, maxA, minB, maxB);
-        return overlap > 0f;
+        return overlap > PENETRATION_EPS;
     }
 
     // Punto más cercano del polígono a un punto externo. Devuelve también el índice del segmento más cercano.
@@ -272,7 +287,7 @@ public static class SAT2DMath
         return a + t * ab;
     }
     
-    public static List<InternalCollisionInfo> DetectCollisions(List<CustomCollider2D> colliders)
+    public static List<InternalCollisionInfo> DetectCollisions(List<PUCV.PhysicEngine2D.CustomCollider2D> colliders)
     {
         List<InternalCollisionInfo> collisions = new List<InternalCollisionInfo>();
 
@@ -280,14 +295,14 @@ public static class SAT2DMath
         {
             for (int j = i + 1; j < colliders.Count; j++)
             {
-                CustomCollider2D colA = colliders[i];
-                CustomCollider2D colB = colliders[j];
+                PUCV.PhysicEngine2D.CustomCollider2D colA = colliders[i];
+                PUCV.PhysicEngine2D.CustomCollider2D colB = colliders[j];
                 
                 SAT2DMath.Sat2DCollisionResult res;
 
                 if (
-                    colA.type != CustomCollider2D.ShapeType.Circle && 
-                    colB.type != CustomCollider2D.ShapeType.Circle)
+                    colA.type != PUCV.PhysicEngine2D.CustomCollider2D.ShapeType.Circle && 
+                    colB.type != PUCV.PhysicEngine2D.CustomCollider2D.ShapeType.Circle)
                 {
                     // Polígono vs Polígono
                     var polyA = colA.GetPolygonVertices().ToArray();
@@ -297,8 +312,8 @@ public static class SAT2DMath
                     res = SAT2DMath.PolygonVsPolygon(polyA, polyB);
                 }
                 else if (
-                    colA.type == CustomCollider2D.ShapeType.Circle && 
-                    colB.type == CustomCollider2D.ShapeType.Circle
+                    colA.type == PUCV.PhysicEngine2D.CustomCollider2D.ShapeType.Circle && 
+                    colB.type == PUCV.PhysicEngine2D.CustomCollider2D.ShapeType.Circle
                     )
                 {
                     // Círculo vs Círculo
@@ -312,8 +327,8 @@ public static class SAT2DMath
                 else
                 {
                     // Círculo vs Polígono
-                    CustomCollider2D circ = colA.type == CustomCollider2D.ShapeType.Circle ? colA : colB;
-                    CustomCollider2D poly  = colA.type == CustomCollider2D.ShapeType.Circle ? colB : colA;
+                    PUCV.PhysicEngine2D.CustomCollider2D circ = colA.type == PUCV.PhysicEngine2D.CustomCollider2D.ShapeType.Circle ? colA : colB;
+                    PUCV.PhysicEngine2D.CustomCollider2D poly  = colA.type == PUCV.PhysicEngine2D.CustomCollider2D.ShapeType.Circle ? colB : colA;
                     
                     var polyVerts = poly.GetPolygonVertices().ToArray();
                     if (polyVerts == null) continue;
@@ -321,13 +336,23 @@ public static class SAT2DMath
                     res = SAT2DMath.CircleVsPolygon(circ.Center, circ.CircleRadius, polyVerts);
                 }
                 
-                if (res.collided)
+                // within DetectCollisions after you have res (with res.normal, res.depth)
+                if (res.collided && res.depth > PENETRATION_EPS)
                 {
-                    //TODO: Calcular punto de contacto más preciso
-                    var collision = new InternalCollisionInfo(colA,colB,Vector2.zero,res.normal);
+                    // compute approximate contact point:
+                    Vector2 contactPoint = Vector2.zero;
+                    // For polygon-polygon: iterate edges/vertices to find closest features (for brevity compute mid-point between closest points)
+                    // Simple heuristic: project centers onto normal and pick midpoint:
+                    Vector2 aPos = colA.Center;
+                    Vector2 bPos = colB.Center;
+                    contactPoint = (aPos + bPos) * 0.5f;
+
+                    var collision = new InternalCollisionInfo(colA, colB, contactPoint, res.normal);
                     collision.hasMTV = true;
-                    collision.mtvA = -res.mtv * 0.5f;
-                    collision.mtvB = res.mtv * 0.5f;
+                    // Keep MTV as A->B direction
+                    Vector2 mtv = res.mtv; // direction * depth
+                    collision.mtvA = -mtv; // move A opposite
+                    collision.mtvB = mtv;  // move B along mtv
                     collisions.Add(collision);
                 }
             }
