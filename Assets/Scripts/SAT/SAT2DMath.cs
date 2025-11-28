@@ -109,7 +109,7 @@ public static class SAT2DMath
         return res;
     }
 
- 
+    // Círculo vs Polígono
     public static Sat2DCollisionResult CircleVsPolygon(Vector2 c, float r, Vector2[] poly)
     {
         Sat2DCollisionResult res = new Sat2DCollisionResult { collided = true, depth = float.PositiveInfinity };
@@ -170,11 +170,29 @@ public static class SAT2DMath
                 res.mtv = axisExtra * overlap2;
             }
         }
+        else
+        {
+            Vector2 fallback = (c - centerPoly);
+            if (fallback.sqrMagnitude > 1e-12f)
+            {
+                fallback.Normalize();
+                ProjectPolygon(poly, fallback, out float minPf, out float maxPf);
+                float centerProjF = Vector2.Dot(c, fallback);
+                float minCf = centerProjF - r;
+                float maxCf = centerProjF + r;
+                float overlapf = GetOverlap(minPf, maxPf, minCf, maxCf);
+                if (overlapf > 0f && overlapf < res.depth)
+                {
+                    res.depth = overlapf;
+                    res.normal = fallback;
+                    res.mtv = fallback * overlapf;
+                }
+            }
+        }
 
         return res;
     }
 
- 
     public static Vector2[] BuildOrientedRect(Vector2 center, Vector2 halfExtents, float degrees)
     {
         float rad = degrees * Mathf.Deg2Rad;
@@ -220,7 +238,6 @@ public static class SAT2DMath
         int j = (i + 1) % poly.Length;
         Vector2 edge = poly[j] - poly[i];
         if (edge.sqrMagnitude < 1e-12f) return Vector2.zero;
-        // normal perpendicular (x, y) -> ( -y, x ) ó ( y, -x ), ambas sirven
         Vector2 n = new Vector2(-edge.y, edge.x).normalized;
         return n;
     }
@@ -300,59 +317,71 @@ public static class SAT2DMath
                 
                 SAT2DMath.Sat2DCollisionResult res;
 
-                if (
-                    colA.type != PUCV.PhysicEngine2D.CustomCollider2D.ShapeType.Circle && 
-                    colB.type != PUCV.PhysicEngine2D.CustomCollider2D.ShapeType.Circle)
+                bool aIsCircle = colA.type == CustomCollider2D.ShapeType.Circle;
+                bool bIsCircle = colB.type == CustomCollider2D.ShapeType.Circle;
+
+                if (!aIsCircle && !bIsCircle)
                 {
                     // Polígono vs Polígono
-                    var polyA = colA.GetPolygonVertices().ToArray();
-                    var polyB = colB.GetPolygonVertices().ToArray();
+                    var polyA = colA.GetPolygonVertices()?.ToArray();
+                    var polyB = colB.GetPolygonVertices()?.ToArray();
                     if (polyA == null || polyB == null) continue;
 
                     res = SAT2DMath.PolygonVsPolygon(polyA, polyB);
                 }
-                else if (
-                    colA.type == PUCV.PhysicEngine2D.CustomCollider2D.ShapeType.Circle && 
-                    colB.type == PUCV.PhysicEngine2D.CustomCollider2D.ShapeType.Circle
-                    )
+                else if (aIsCircle && bIsCircle)
                 {
                     // Círculo vs Círculo
                     res = SAT2DMath.CircleVsCircle(
-                        colA.Center, 
-                        colA.CircleRadius, 
-                        colB.Center, 
+                        colA.Center,
+                        colA.CircleRadius,
+                        colB.Center,
                         colB.CircleRadius
                         );
                 }
                 else
                 {
                     // Círculo vs Polígono
-                    PUCV.PhysicEngine2D.CustomCollider2D circ = colA.type == PUCV.PhysicEngine2D.CustomCollider2D.ShapeType.Circle ? colA : colB;
-                    PUCV.PhysicEngine2D.CustomCollider2D poly  = colA.type == PUCV.PhysicEngine2D.CustomCollider2D.ShapeType.Circle ? colB : colA;
-                    
-                    var polyVerts = poly.GetPolygonVertices().ToArray();
+                    var circ = aIsCircle ? colA : colB;
+                    var poly = aIsCircle ? colB : colA;
+
+                    var polyVerts = poly.GetPolygonVertices()?.ToArray();
                     if (polyVerts == null) continue;
 
                     res = SAT2DMath.CircleVsPolygon(circ.Center, circ.CircleRadius, polyVerts);
                 }
                 
-                // within DetectCollisions after you have res (with res.normal, res.depth)
                 if (res.collided && res.depth > PENETRATION_EPS)
                 {
-                    // compute approximate contact point:
                     Vector2 contactPoint = Vector2.zero;
-                    // For polygon-polygon: iterate edges/vertices to find closest features (for brevity compute mid-point between closest points)
-                    // Simple heuristic: project centers onto normal and pick midpoint:
-                    Vector2 aPos = colA.Center;
-                    Vector2 bPos = colB.Center;
-                    contactPoint = (aPos + bPos) * 0.5f;
+
+                    if (aIsCircle ^ bIsCircle)
+                    {
+                        var circ = aIsCircle ? colA : colB;
+                        var poly = aIsCircle ? colB : colA;
+                        var polyVerts = poly.GetPolygonVertices()?.ToArray();
+                        if (polyVerts == null) continue;
+
+                        contactPoint = ClosestPointOnPolygon(circ.Center, polyVerts, out int _);
+                    }
+                    else if (aIsCircle && bIsCircle)
+                    {
+                        contactPoint = (colA.Center + colB.Center) * 0.5f;
+                    }
+                    else
+                    {
+                        contactPoint = (colA.Center + colB.Center) * 0.5f;
+                    }
+
+                    Vector2 mtv = res.mtv; 
+                    Vector2 ab = colB.Center - colA.Center;
+                    if (Vector2.Dot(mtv, ab) < 0f)
+                        mtv = -mtv;
 
                     var collision = new InternalCollisionInfo(colA, colB, contactPoint, res.normal);
                     collision.hasMTV = true;
-                    // Keep MTV as A->B direction
-                    Vector2 mtv = res.mtv; // direction * depth
-                    collision.mtvA = -mtv; // move A opposite
-                    collision.mtvB = mtv;  // move B along mtv
+                    collision.mtvA = -mtv;
+                    collision.mtvB = mtv;
                     collisions.Add(collision);
                 }
             }
